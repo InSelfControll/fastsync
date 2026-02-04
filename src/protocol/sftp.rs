@@ -42,6 +42,14 @@ impl SftpConnectionInfo {
     /// - user@host:~/relative/path  
     /// - user@host:port:/absolute/path
     /// - user@host:port:~/relative/path
+    /// - user@[IPv6]:/path (bracketed IPv6)
+    /// - user@[IPv6]:port:/path (bracketed IPv6 with port)
+    /// - user@[IPv6]:~/path (bracketed IPv6 with home path)
+    /// - user@IPv6:/path (bare IPv6 with explicit path)
+    /// - user@IPv6:~/path (bare IPv6 with home path)
+    /// - user@IPv6 (bare IPv6, default path ~)
+    /// 
+    /// Note: For IPv6 with custom port, use bracketed format: [IPv6]:port:path
     pub fn parse(input: &str) -> Option<Self> {
         // Handle user@host:path format
         let at_idx = input.find('@')?;
@@ -49,6 +57,117 @@ impl SftpConnectionInfo {
 
         let rest = &input[at_idx + 1..];
 
+        // Check if host is bracketed IPv6 like [::1] or [2a01::1]:port
+        if rest.starts_with('[') {
+            return Self::parse_bracketed_ipv6(&user, rest);
+        }
+
+        // Not bracketed - could be hostname or bare IPv6
+        // Check if it looks like an IPv6 address (multiple consecutive colons :: or >2 colons)
+        let colon_count = rest.chars().filter(|&c| c == ':').count();
+        let is_likely_ipv6 = rest.contains("::") || colon_count > 2;
+        
+        if is_likely_ipv6 {
+            // For bare IPv6, look for explicit path markers :/ or :~
+            // We search from left to right to find the first occurrence
+            // but we need to be careful not to match colons inside the IPv6 address
+            // The key is that :/ and :~ are unambiguous path markers
+            
+            if let Some(path_sep_idx) = rest.find(":/").or_else(|| rest.find(":~")) {
+                // Found path separator - everything before it is the host
+                let host_part = &rest[..path_sep_idx];
+                let path = &rest[path_sep_idx + 1..];
+                
+                return Some(Self {
+                    user,
+                    host: host_part.to_string(),
+                    port: 22,
+                    path: path.to_string(),
+                });
+            }
+            
+            // No path marker found - the whole thing is the IPv6 address
+            // Use default path
+            return Some(Self {
+                user,
+                host: rest.to_string(),
+                port: 22,
+                path: "~".to_string(),
+            });
+        }
+
+        // Regular hostname - use standard parsing
+        Self::parse_hostname(&user, rest)
+    }
+    
+    /// Parse bracketed IPv6 format: [IPv6]:/path, [IPv6]:port:/path, [IPv6]:~/path
+    fn parse_bracketed_ipv6(user: &str, rest: &str) -> Option<Self> {
+        // Find closing bracket
+        let bracket_end = rest.find(']')?;
+        let host = rest[1..bracket_end].to_string();
+        
+        // After the bracket, we might have :port or :/path or :~path
+        let after_bracket = &rest[bracket_end + 1..];
+        
+        if after_bracket.is_empty() {
+            // No port or path specified
+            return Some(Self {
+                user: user.to_string(),
+                host,
+                port: 22,
+                path: "~".to_string(),
+            });
+        }
+        
+        // Check what comes after the bracket
+        // It should start with : (either :port or :/path or :~path)
+        if !after_bracket.starts_with(':') {
+            // Invalid format - bracketed IPv6 must be followed by :
+            return None;
+        }
+        
+        let after_colon = &after_bracket[1..]; // Skip the colon
+        
+        // Check if it's a path directly (starts with / or ~)
+        if after_colon.starts_with('/') || after_colon.starts_with('~') {
+            return Some(Self {
+                user: user.to_string(),
+                host,
+                port: 22,
+                path: after_colon.to_string(),
+            });
+        }
+        
+        // It might be a port number followed by a path
+        // Format: [IPv6]:port:/path or [IPv6]:port:~/path
+        if let Some(second_colon) = after_colon.find(':') {
+            let potential_port = &after_colon[..second_colon];
+            let after_port = &after_colon[second_colon + 1..];
+            
+            // Check if it's a valid port number
+            if potential_port.chars().all(|c| c.is_ascii_digit()) {
+                let port = potential_port.parse().unwrap_or(22);
+                let path = if after_port.is_empty() { "~" } else { after_port };
+                return Some(Self {
+                    user: user.to_string(),
+                    host,
+                    port,
+                    path: path.to_string(),
+                });
+            }
+        }
+        
+        // If we can't parse it as port:path, treat the rest as path
+        Some(Self {
+            user: user.to_string(),
+            host,
+            port: 22,
+            path: after_colon.to_string(),
+        })
+    }
+    
+    /// Parse regular hostname format: host:/path, host:port:/path, etc.
+    fn parse_hostname(user: &str, rest: &str) -> Option<Self> {
         // Find the path separator - look for :/ or :~
         // This distinguishes host:port from host:path
         let path_sep_idx = rest.find(":/")
@@ -92,7 +211,7 @@ impl SftpConnectionInfo {
         };
 
         Some(Self {
-            user,
+            user: user.to_string(),
             host,
             port,
             path: path.to_string(),
@@ -915,6 +1034,112 @@ mod tests {
             path: "~".to_string(),
         };
         assert_eq!(info.normalize_path(), "/root");
+    }
+
+    #[test]
+    fn test_parse_ipv6_bare_address() {
+        // Bare IPv6 address without brackets - with explicit path
+        let info = SftpConnectionInfo::parse("root@2a01:4f8:c17:a568::1:/path/to/file").unwrap();
+        assert_eq!(info.user, "root");
+        assert_eq!(info.host, "2a01:4f8:c17:a568::1");
+        assert_eq!(info.port, 22);
+        assert_eq!(info.path, "/path/to/file");
+
+        // Bare IPv6 with home directory
+        let info = SftpConnectionInfo::parse("user@2a01:4f8:c17:a568::1:~/file.txt").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "2a01:4f8:c17:a568::1");
+        assert_eq!(info.port, 22);
+        assert_eq!(info.path, "~/file.txt");
+
+        // Bare IPv6 localhost (::1) with path
+        let info = SftpConnectionInfo::parse("user@::1:~/file").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "::1");
+        assert_eq!(info.port, 22);
+        assert_eq!(info.path, "~/file");
+
+        // Bare IPv6 localhost (::1) with absolute path
+        let info = SftpConnectionInfo::parse("user@::1:/tmp").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "::1");
+        assert_eq!(info.port, 22);
+        assert_eq!(info.path, "/tmp");
+
+        // Bare IPv6 without path - uses default ~
+        let info = SftpConnectionInfo::parse("user@2a01:4f8:c17:a568::1").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "2a01:4f8:c17:a568::1");
+        assert_eq!(info.port, 22);
+        assert_eq!(info.path, "~");
+
+        // Note: For IPv6 with custom port, use bracketed format
+        // Example: user@[2a01::1]:2222:/path
+    }
+
+    #[test]
+    fn test_parse_ipv6_bracketed_address() {
+        // Bracketed IPv6 address
+        let info = SftpConnectionInfo::parse("root@[2a01:4f8:c17:a568::1]:/path/to/file").unwrap();
+        assert_eq!(info.user, "root");
+        assert_eq!(info.host, "2a01:4f8:c17:a568::1");
+        assert_eq!(info.port, 22);
+        assert_eq!(info.path, "/path/to/file");
+
+        // Bracketed IPv6 with port
+        let info = SftpConnectionInfo::parse("user@[2a01:4f8:c17:a568::1]:2222:/path").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "2a01:4f8:c17:a568::1");
+        assert_eq!(info.port, 2222);
+        assert_eq!(info.path, "/path");
+
+        // Bracketed IPv6 localhost
+        let info = SftpConnectionInfo::parse("user@[::1]:~/file").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "::1");
+        assert_eq!(info.port, 22);
+        assert_eq!(info.path, "~/file");
+
+        // Bracketed IPv6 with home path
+        let info = SftpConnectionInfo::parse("user@[2001:db8::1]:~").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "2001:db8::1");
+        assert_eq!(info.port, 22);
+        assert_eq!(info.path, "~");
+    }
+
+    #[test]
+    fn test_parse_ipv6_edge_cases() {
+        // IPv6 with zone ID (link-local) - bracketed
+        let info = SftpConnectionInfo::parse("user@[fe80::1%eth0]:/path").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "fe80::1%eth0");
+        assert_eq!(info.port, 22);
+        assert_eq!(info.path, "/path");
+
+        // IPv6 localhost shorthand - bare
+        let info = SftpConnectionInfo::parse("user@::1:/tmp").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "::1");
+        assert_eq!(info.path, "/tmp");
+
+        // Full IPv6 address - bare
+        let info = SftpConnectionInfo::parse("user@2001:0db8:85a3:0000:0000:8a2e:0370:7334:~/file").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "2001:0db8:85a3:0000:0000:8a2e:0370:7334");
+        assert_eq!(info.path, "~/file");
+
+        // Full IPv6 address - no path (default ~)
+        let info = SftpConnectionInfo::parse("user@2001:0db8:85a3:0000:0000:8a2e:0370:7334").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "2001:0db8:85a3:0000:0000:8a2e:0370:7334");
+        assert_eq!(info.path, "~");
+
+        // IPv6 with zone ID (link-local) - bare with path
+        let info = SftpConnectionInfo::parse("user@fe80::1%eth0:~/docs").unwrap();
+        assert_eq!(info.user, "user");
+        assert_eq!(info.host, "fe80::1%eth0");
+        assert_eq!(info.path, "~/docs");
     }
 
     /// Test SSH agent connection - only runs if SSH_AUTH_SOCK is set
