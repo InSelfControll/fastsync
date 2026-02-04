@@ -117,10 +117,12 @@ enum Commands {
         dest: String,
     },
 
-    /// List directory contents
+    /// List directory contents (local or SFTP)
     ///
     /// Lists files in a local directory or remote SFTP location.
     /// Supports both local paths and SFTP URLs.
+    ///
+    /// For SFTP connections, use the format: user@host:path or user@[IPv6]:path
     #[command(name = "ls")]
     #[command(after_help = "EXAMPLES:
     # List local directory
@@ -137,6 +139,9 @@ enum Commands {
 
     # List bare IPv6 address
     fastsync ls root@2a01:4f8:c17:a568::1:/tmp
+
+    # List with specific SSH key
+    fastsync ls -i ~/.ssh/my_key user@server:/home/user/
 ")]
     Ls {
         /// Directory path or SFTP URL to list
@@ -197,7 +202,7 @@ async fn main() -> Result<()> {
             copy(&source, &dest, cli.parallel.unwrap_or(4), ip_version, cli.identity.as_deref()).await
         }
         Commands::Sync { source, dest } => sync(&source, &dest).await,
-        Commands::Ls { url } => list(&url).await,
+        Commands::Ls { url } => list(&url, ip_version, cli.identity.as_deref()).await,
         Commands::Download { urls, output } => {
             download(
                 &urls,
@@ -366,7 +371,24 @@ async fn sync(source: &str, dest: &str) -> Result<()> {
     Ok(())
 }
 
-async fn list(url: &str) -> Result<()> {
+async fn list(url: &str, ip_version: IpVersion, identity: Option<&Path>) -> Result<()> {
+    // Check if it's an SFTP URL (user@host:path syntax)
+    if let Some(conn_info) = SftpConnectionInfo::parse(url) {
+        // Create protocol instance with optional identity file
+        let protocol = if let Some(identity_path) = identity {
+            SftpProtocol::new_with_ip_version_and_identity(conn_info.clone(), ip_version, Some(identity_path.to_path_buf()))
+        } else {
+            SftpProtocol::new_with_ip_version(conn_info.clone(), ip_version)
+        };
+
+        let entries = protocol.list().await?;
+        for entry in entries {
+            println!("{}", entry);
+        }
+        return Ok(());
+    }
+
+    // Handle local file paths
     let url = parse_url(url)?;
 
     if url.scheme() == "file" {
