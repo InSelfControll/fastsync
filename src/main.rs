@@ -11,6 +11,35 @@ use protocol::{HttpProtocol, IpVersion, LocalProtocol, Protocol, SftpConnectionI
 #[derive(Parser)]
 #[command(name = "fastsync")]
 #[command(about = "High-performance file transfer tool")]
+#[command(long_about = "fastsync - A high-performance file transfer tool supporting HTTP/HTTPS, SFTP, and local file operations.
+
+Supports:
+  - HTTP/HTTPS downloads with resume capability
+  - SFTP uploads and downloads with SSH key authentication
+  - Local file copy operations
+  - IPv4/IPv6 connections
+  - Progress bars with transfer speed")]
+#[command(after_help = "EXAMPLES:
+    # Download a file from HTTP
+    fastsync dl https://example.com/file.zip
+
+    # Upload to SFTP server
+    fastsync cp localfile.txt user@remote_host:~/Documents/
+
+    # Download from SFTP with specific SSH key
+    fastsync cp -i ~/.ssh/my_key user@host:/remote/file.txt ./
+
+    # Copy locally with progress bar
+    fastsync cp large_file.iso /backup/
+
+    # Use IPv6 address for SFTP
+    fastsync cp file.txt root@[2001:db8::1]:/var/www/
+
+    # Resume interrupted download
+    fastsync dl -r https://example.com/large.iso ./downloads/
+
+Use 'fastsync <command> --help' for more information on a specific command.
+")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -36,18 +65,114 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Copy files between local, HTTP, and SFTP locations
+    ///
+    /// Supports copying files between different protocols:
+    /// - Local to local: fastsync cp file.txt /backup/
+    /// - Local to SFTP: fastsync cp file.txt user@host:~/
+    /// - SFTP to local: fastsync cp user@host:~/file.txt ./
+    /// - HTTP to local: fastsync cp https://example.com/file.iso ./
+    ///
+    /// SFTP connection format: user@host:path or user@host:port:path
+    /// IPv6 addresses: user@[IPv6]:path or user@IPv6:/path
     #[command(name = "cp", alias = "copy")]
-    Cp { source: String, dest: String },
+    #[command(after_help = "EXAMPLES:
+    # Upload local file to SFTP server
+    fastsync cp document.pdf user@remote_host:~/Documents/
 
+    # Download from SFTP to current directory
+    fastsync cp user@host:/var/log/syslog ./
+
+    # Use custom SSH port
+    fastsync cp file.txt user@host:2222:~/uploads/
+
+    # Use IPv6 address
+    fastsync cp file.txt root@2a01:4f8:c17:a568::1:/var/www/
+
+    # Use bracketed IPv6 with custom port
+    fastsync cp file.txt user@[2001:db8::1]:2222:~/data/
+
+    # Use specific SSH identity file
+    fastsync cp -i ~/.ssh/work_key deploy.tar.gz deploy@server:/tmp/
+
+    # Force IPv4 for connection
+    fastsync cp -4 file.txt user@host:~/
+
+    # Copy between local directories
+    fastsync cp -r ./source/ ./backup/
+")]
+    Cp {
+        /// Source path, URL, or SFTP location (user@host:path)
+        source: String,
+        /// Destination path, URL, or SFTP location (user@host:path)
+        dest: String,
+    },
+
+    /// Sync directories between locations (not yet implemented)
     #[command(name = "sync")]
-    Sync { source: String, dest: String },
+    Sync {
+        /// Source directory
+        source: String,
+        /// Destination directory
+        dest: String,
+    },
 
+    /// List directory contents
+    ///
+    /// Lists files in a local directory or remote SFTP location.
+    /// Supports both local paths and SFTP URLs.
     #[command(name = "ls")]
-    Ls { url: String },
+    #[command(after_help = "EXAMPLES:
+    # List local directory
+    fastsync ls /var/log
 
+    # List home directory via SFTP
+    fastsync ls user@remote_host:~
+
+    # List specific remote directory
+    fastsync ls admin@server:/etc/nginx/
+
+    # List using IPv6 address
+    fastsync ls user@[2001:db8::1]:/var/log
+
+    # List bare IPv6 address
+    fastsync ls root@2a01:4f8:c17:a568::1:/tmp
+")]
+    Ls {
+        /// Directory path or SFTP URL to list
+        url: String,
+    },
+
+    /// Download files from HTTP/HTTPS URLs
+    ///
+    /// Downloads files from one or more URLs with progress tracking.
+    /// Supports resume capability for interrupted downloads.
+    ///
+    /// Use -r to resume partial downloads and -p to set parallel streams.
     #[command(name = "dl", alias = "download")]
+    #[command(after_help = "EXAMPLES:
+    # Download a file to current directory
+    fastsync dl https://example.com/file.zip
+
+    # Download to specific directory
+    fastsync dl https://example.com/file.iso ./downloads/
+
+    # Resume interrupted download
+    fastsync dl -r https://example.com/large.iso ./
+
+    # Download with 8 parallel streams (faster for supported servers)
+    fastsync dl -p 8 https://example.com/file.tar.gz /tmp/
+
+    # Download multiple files
+    fastsync dl https://site.com/file1.zip https://site.com/file2.zip ./downloads/
+
+    # Force IPv6 connection
+    fastsync dl -6 https://example.com/file.zip
+")]
     Download {
+        /// One or more URLs to download
         urls: Vec<String>,
+        /// Output directory (defaults to current directory)
         #[arg(last = true)]
         output: Option<PathBuf>,
     },
